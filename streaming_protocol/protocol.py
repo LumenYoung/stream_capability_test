@@ -7,6 +7,8 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field
 
+from streaming_protocol.models import StreamState
+
 
 class ImageRole(IntEnum):
     LEFT = 0
@@ -50,11 +52,11 @@ class Frame(BaseModel):
 
     frame_id: int = Field(ge=0)
     send_timestamp_ns: int = Field(ge=0)
-    meta: dict[str, Any]
+    meta: StreamState
     images: dict[ImageRole, bytes]
 
     def to_wire(self) -> bytes:
-        meta_bytes = json.dumps(self.meta, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        meta_bytes = self.meta.model_dump_json().encode("utf-8")
         items = list(self.images.items())
         header = _HEADER_STRUCT.pack(
             self.MAGIC,
@@ -103,7 +105,7 @@ class Frame(BaseModel):
 
         meta_bytes = payload[offset : offset + meta_len]
         offset += meta_len
-        meta = json.loads(meta_bytes.decode("utf-8"))
+        meta = StreamState.model_validate_json(meta_bytes)
 
         images: dict[ImageRole, bytes] = {}
         for _ in range(int(image_count)):

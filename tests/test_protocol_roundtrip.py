@@ -7,13 +7,13 @@ from streaming_protocol.protocol import Frame, ImageRole
 def _make_good_meta(timestamp_ns: int = 123) -> dict:
     return {
         "state": [float(i) for i in range(50)],
-        "remaining_action_chunks": [[float(j) for j in range(22)] for _ in range(50)],
+        "remaining_action_chunks": [[float(j) for j in range(22)] for _ in range(37)],
         "timestamp_ns": int(timestamp_ns),
     }
 
 
 def test_frame_to_wire_from_wire_roundtrip():
-    meta = _make_good_meta(123)
+    meta = StreamState.model_validate(_make_good_meta(123))
     jpeg_left = b"\xff\xd8LEFT\xff\xd9"
     jpeg_center = b"\xff\xd8CENTER\xff\xd9"
     jpeg_right = b"\xff\xd8RIGHT\xff\xd9"
@@ -40,14 +40,13 @@ def test_frame_to_wire_from_wire_roundtrip():
     assert decoded.images[ImageRole.RIGHT] == jpeg_right
     assert decoded.images[ImageRole.BACK] == jpeg_back
 
-    validated = StreamState.model_validate(decoded.meta)
-    assert len(validated.state) == 50
-    assert len(validated.remaining_action_chunks) == 50
-    assert all(len(row) == 22 for row in validated.remaining_action_chunks)
+    assert len(decoded.meta.state) == 50
+    assert len(decoded.meta.remaining_action_chunks) == 37
+    assert all(len(row) == 22 for row in decoded.meta.remaining_action_chunks)
 
 
 def test_from_wire_rejects_trailing_bytes():
-    meta = _make_good_meta(1)
+    meta = StreamState.model_validate(_make_good_meta(1))
     frame = Frame(
         frame_id=1,
         send_timestamp_ns=1,
@@ -60,7 +59,7 @@ def test_from_wire_rejects_trailing_bytes():
 
 
 def test_from_wire_rejects_unknown_image_role():
-    meta = _make_good_meta(1)
+    meta = StreamState.model_validate(_make_good_meta(1))
     frame = Frame(
         frame_id=1,
         send_timestamp_ns=1,
@@ -74,7 +73,7 @@ def test_from_wire_rejects_unknown_image_role():
     mutated = bytearray(payload)
     import json
 
-    meta_len = len(json.dumps(frame.meta, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    meta_len = len(frame.meta.model_dump_json().encode("utf-8"))
     role_offset = 32 + meta_len  # header is 32 bytes in v2
     mutated[role_offset] = 255
 
@@ -85,7 +84,7 @@ def test_from_wire_rejects_unknown_image_role():
 def test_model_rejects_wrong_inner_dim_strict_22():
     bad = {
         "state": [0.0] * 50,
-        "remaining_action_chunks": [[0.0] * 21 for _ in range(50)],
+        "remaining_action_chunks": [[0.0] * 21 for _ in range(20)],
         "timestamp_ns": 0,
     }
     with pytest.raises(Exception):

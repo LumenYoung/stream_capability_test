@@ -47,7 +47,7 @@ async def ws_receiver_task(ws_url: str, latest: LatestFrame) -> None:
 
             recv_ts = _ns_now()
             frame = Frame.from_wire(bytes(message))
-            meta = StreamState.model_validate(frame.meta)
+            meta = frame.meta
             jpeg1 = frame.images.get(ImageRole.LEFT) or b""
 
             # Convert to numpy arrays (not used yet)

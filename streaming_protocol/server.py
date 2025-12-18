@@ -34,7 +34,8 @@ def _rand_state() -> list[float]:
 
 
 def _rand_remaining_action_chunks() -> list[list[float]]:
-    return [[random.random() for _ in range(22)] for _ in range(50)]
+    n = random.randint(20, 50)
+    return [[random.random() for _ in range(22)] for _ in range(n)]
 
 
 def _resize_and_jpeg(bgr: np.ndarray, *, width: int, height: int, jpeg_quality: int) -> bytes:
@@ -108,7 +109,7 @@ async def stream_handler(ws: websockets.ServerConnection, cfg: ServerConfig, qua
             state=_rand_state(),
             remaining_action_chunks=_rand_remaining_action_chunks(),
             timestamp_ns=send_ts,
-        ).model_dump()
+        )
         jpeg1, jpeg2, jpeg3, jpeg4 = quads[next_idx]
 
         payload = Frame(
