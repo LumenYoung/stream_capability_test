@@ -45,10 +45,22 @@ async def ws_receiver_task(ws_url: str, latest: LatestFrame) -> None:
             if not isinstance(message, (bytes, bytearray)):
                 continue
 
+            if getattr(latest, "debug", False):
+                print(f"rx ws_message bytes={len(message)}")
+
             recv_ts = _ns_now()
             frame = Frame.from_wire(bytes(message))
             meta = frame.meta
             jpeg1 = frame.images.get(ImageRole.LEFT) or b""
+
+            if getattr(latest, "debug", False):
+                role_parts = ", ".join(
+                    f"{role.name}:{len(jpeg)}" for role, jpeg in sorted(frame.images.items(), key=lambda kv: int(kv[0]))
+                )
+                print(
+                    f"parsed frame_id={frame.frame_id} send_ts_ns={frame.send_timestamp_ns} "
+                    f"meta_ts_ns={meta.timestamp_ns} images={len(frame.images)} [{role_parts}]"
+                )
 
             # Convert to numpy arrays (not used yet)
             if jpeg1:
@@ -154,12 +166,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ws", default="ws://127.0.0.1:8765")
     p.add_argument("--http-host", default="127.0.0.1")
     p.add_argument("--http-port", type=int, default=8000)
+    p.add_argument("--debug", action="store_true", help="print per-message size and parsed fields")
     return p.parse_args()
 
 
 async def main_async() -> None:
     args = parse_args()
     latest = LatestFrame()
+    setattr(latest, "debug", bool(args.debug))
 
     await asyncio.gather(
         ws_receiver_task(args.ws, latest),
