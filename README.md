@@ -36,8 +36,16 @@ Open `http://127.0.0.1:8000`.
 
 ## Protocol
 
-Each WebSocket binary message contains:
+Each WebSocket binary message contains (v2):
 
-- header (magic/version/frame_id/timestamps + lengths)
-- metadata JSON (`{"state":[...50 floats...],"timestamp_ns":...}`)
-- 3 JPEG byte blobs (each `480x300`)
+- header (magic/version/frame_id/send_timestamp_ns/meta_len/image_count)
+- metadata JSON validated by Pydantic (`StreamState`)
+- `image_count` images, each encoded as: `role:uint8 + len:uint32 + jpeg_bytes`
+
+Image roles on the wire are defined by `ImageRole`:
+- `0`: LEFT
+- `1`: CENTER
+- `2`: RIGHT
+- `3`: BACK
+
+The server sends 4 images per frame by default, but the viewer page renders only the LEFT image as a proof-of-receiving.

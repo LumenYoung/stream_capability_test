@@ -14,7 +14,7 @@ import numpy as np
 import websockets
 
 from streaming_protocol.models import StreamState
-from streaming_protocol.protocol import decode_frame
+from streaming_protocol.protocol import Frame, ImageRole
 
 
 @dataclass
@@ -46,11 +46,13 @@ async def ws_receiver_task(ws_url: str, latest: LatestFrame) -> None:
                 continue
 
             recv_ts = _ns_now()
-            frame = decode_frame(bytes(message))
+            frame = Frame.from_wire(bytes(message))
             meta = StreamState.model_validate(frame.meta)
+            jpeg1 = frame.images.get(ImageRole.LEFT) or b""
 
             # Convert to numpy arrays (not used yet)
-            _img1 = _jpeg_bytes_to_bgr(frame.jpeg1)
+            if jpeg1:
+                _img1 = _jpeg_bytes_to_bgr(jpeg1)
             _state = np.asarray(meta.state, dtype=np.float32)
             _remaining_action_chunks = np.asarray(meta.remaining_action_chunks, dtype=np.float32)
 
@@ -59,7 +61,7 @@ async def ws_receiver_task(ws_url: str, latest: LatestFrame) -> None:
             latest.send_timestamp_ns = meta.timestamp_ns
             latest.recv_timestamp_ns = recv_ts
             latest.latency_ms = float(latency_ms)
-            latest.jpeg1 = frame.jpeg1
+            latest.jpeg1 = jpeg1
             latest.meta = meta.model_dump()
 
 

@@ -11,7 +11,7 @@ import numpy as np
 import websockets
 
 from streaming_protocol.models import StreamState
-from streaming_protocol.protocol import encode_frame
+from streaming_protocol.protocol import Frame, ImageRole
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ def _ns_now() -> int:
 def _rand_state() -> list[float]:
     return [random.random() for _ in range(50)]
 
+
 def _rand_remaining_action_chunks() -> list[list[float]]:
     return [[random.random() for _ in range(22)] for _ in range(50)]
 
@@ -44,7 +45,7 @@ def _resize_and_jpeg(bgr: np.ndarray, *, width: int, height: int, jpeg_quality: 
     return buf.tobytes()
 
 
-def preload_video_as_triplets(cfg: ServerConfig) -> list[tuple[bytes, bytes, bytes]]:
+def preload_video_as_quads(cfg: ServerConfig) -> list[tuple[bytes, bytes, bytes, bytes]]:
     cap = cv2.VideoCapture(cfg.video_path)
     if not cap.isOpened():
         raise RuntimeError(f"failed to open video: {cfg.video_path}")
@@ -59,77 +60,116 @@ def preload_video_as_triplets(cfg: ServerConfig) -> list[tuple[bytes, bytes, byt
     finally:
         cap.release()
 
-    if len(frames) < 3:
-        raise RuntimeError(f"video must have at least 3 frames; got {len(frames)}")
+    if len(frames) < 4:
+        raise RuntimeError(f"video must have at least 4 frames; got {len(frames)}")
 
-    triplets: list[tuple[bytes, bytes, bytes]] = []
-    for i in range(0, len(frames) - 2):
+    quads: list[tuple[bytes, bytes, bytes, bytes]] = []
+    for i in range(0, len(frames) - 3):
         j1 = _resize_and_jpeg(frames[i], width=cfg.width, height=cfg.height, jpeg_quality=cfg.jpeg_quality)
         j2 = _resize_and_jpeg(frames[i + 1], width=cfg.width, height=cfg.height, jpeg_quality=cfg.jpeg_quality)
         j3 = _resize_and_jpeg(frames[i + 2], width=cfg.width, height=cfg.height, jpeg_quality=cfg.jpeg_quality)
-        triplets.append((j1, j2, j3))
+        j4 = _resize_and_jpeg(frames[i + 3], width=cfg.width, height=cfg.height, jpeg_quality=cfg.jpeg_quality)
+        quads.append((j1, j2, j3, j4))
 
-    if not triplets:
-        raise RuntimeError("no triplets generated from video")
-    return triplets
+    if not quads:
+        raise RuntimeError("no quads generated from video")
+    return quads
 
 
-async def stream_handler(ws: websockets.ServerConnection, cfg: ServerConfig, triplets: list[tuple[bytes, bytes, bytes]]):
+async def stream_handler(ws: websockets.ServerConnection, cfg: ServerConfig, quads: list[tuple[bytes, bytes, bytes, bytes]]):
     frame_id = 0
     next_idx = 0
     period_s = 1.0 / cfg.fps if cfg.fps > 0 else 0.0
     bytes_sent = 0
     frames_sent = 0
     last_report_ns = _ns_now()
+    missed_deadlines = 0
+    start_ns = _ns_now()
+    dropped_frames = 0
+
+    latest_payload: bytes | None = None
+    latest_payload_bytes = 0
+    latest_frame_id = -1
 
     # If the client is slower than the server, we prefer to drop frames by not awaiting too long.
     # websockets will still apply backpressure, but period pacing limits server send rate.
     while True:
+        if period_s > 0:
+            target_ns = start_ns + int(frame_id * period_s * 1e9)
+            now_ns = _ns_now()
+            if now_ns < target_ns:
+                await asyncio.sleep((target_ns - now_ns) / 1e9)
+            else:
+                if now_ns - target_ns > int(0.5 * period_s * 1e9):
+                    missed_deadlines += 1
+
         send_ts = _ns_now()
         meta = StreamState(
             state=_rand_state(),
             remaining_action_chunks=_rand_remaining_action_chunks(),
             timestamp_ns=send_ts,
         ).model_dump()
-        jpeg1, jpeg2, jpeg3 = triplets[next_idx]
+        jpeg1, jpeg2, jpeg3, jpeg4 = quads[next_idx]
 
-        payload = encode_frame(
+        payload = Frame(
             frame_id=frame_id,
             send_timestamp_ns=send_ts,
             meta=meta,
-            jpeg1=jpeg1,
-            jpeg2=jpeg2,
-            jpeg3=jpeg3,
-        )
+            images={
+                ImageRole.LEFT: jpeg1,
+                ImageRole.CENTER: jpeg2,
+                ImageRole.RIGHT: jpeg3,
+                ImageRole.BACK: jpeg4,
+            },
+        ).to_wire()
 
-        await ws.send(payload)
-        bytes_sent += len(payload)
-        frames_sent += 1
+        # "Always latest" behavior:
+        # Keep only the newest payload; if the previous newest hasn't been sent yet, consider it dropped.
+        if latest_payload is not None:
+            dropped_frames += 1
+        latest_payload = payload
+        latest_payload_bytes = len(payload)
+        latest_frame_id = frame_id
+
+        # Attempt to flush the latest payload; if backpressured, keep it for a later attempt.
+        if latest_payload is not None:
+            try:
+                await asyncio.wait_for(ws.send(latest_payload), timeout=0.002)
+                bytes_sent += latest_payload_bytes
+                frames_sent += 1
+                latest_payload = None
+                latest_payload_bytes = 0
+                latest_frame_id = -1
+            except TimeoutError:
+                pass
 
         now_ns = _ns_now()
         if now_ns - last_report_ns >= 1_000_000_000:
             elapsed_s = (now_ns - last_report_ns) / 1e9
             mib_s = (bytes_sent / (1024 * 1024)) / elapsed_s
             fps = frames_sent / elapsed_s
-            print(f"tx {mib_s:.2f} MiB/s ({bytes_sent} bytes), {fps:.1f} msg/s")
+            print(
+                f"tx {mib_s:.2f} MiB/s ({bytes_sent} bytes), {fps:.1f} msg/s, "
+                f"missed_deadlines={missed_deadlines}, dropped_frames={dropped_frames}"
+            )
             bytes_sent = 0
             frames_sent = 0
+            missed_deadlines = 0
+            dropped_frames = 0
             last_report_ns = now_ns
 
         frame_id += 1
-        next_idx = (next_idx + 1) % len(triplets)
-        if period_s > 0:
-            await asyncio.sleep(period_s)
+        next_idx = (next_idx + 1) % len(quads)
 
 
 async def run_server(cfg: ServerConfig) -> None:
-    triplets = preload_video_as_triplets(cfg)
-    print(f"preloaded {len(triplets)} triplets into RAM")
+    quads = preload_video_as_quads(cfg)
+    print(f"preloaded {len(quads)} quads into RAM")
 
     async def _handler(ws: websockets.ServerConnection):
         print("client connected")
         try:
-            await stream_handler(ws, cfg, triplets)
+            await stream_handler(ws, cfg, quads)
         except websockets.ConnectionClosed:
             pass
         finally:
